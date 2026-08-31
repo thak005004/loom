@@ -1,4 +1,4 @@
-"""Live demo dashboard (Section 9/10/12). A thin Streamlit shell over
+"""Loom's live demo dashboard (Section 9/10/12). A thin Streamlit shell over
 the already-built system — every button below reuses an existing
 adapter's parse()/emit(), the existing RePlanner, and the existing
 bandit policy/reward loop. Nothing here re-implements scheduling logic;
@@ -530,7 +530,7 @@ def _render_explainer_tab(world: WorldState, replanner: RePlanner) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="Heterogeneous AI Task Orchestrator", layout="wide", page_icon="🛰️")
+    st.set_page_config(page_title="Loom", layout="wide", page_icon="🛰️")
     _hide_streamlit_chrome()
     init_state()
 
@@ -539,11 +539,11 @@ def main() -> None:
     registry = st.session_state.registry
     history = st.session_state.weight_history
 
-    st.title("🛰️ Heterogeneous AI Task Orchestrator")
+    st.title("🛰️ Loom")
     st.caption(
-        "A fleet of CPU/GPU/NPU devices fed by independent data streams, scheduled by a CP-SAT solver "
-        "whose objective is chosen by a self-adapting policy, and re-planned incrementally — not from "
-        "scratch — whenever something changes."
+        "Loom is a dynamic, self-improving task orchestrator: a fleet of CPU/GPU/NPU devices fed by "
+        "independent data streams, scheduled by a CP-SAT solver whose objective is chosen by a "
+        "self-adapting policy, and re-planned incrementally — not from scratch — whenever something changes."
     )
     with st.expander("ℹ️  How to read this page"):
         st.markdown(
