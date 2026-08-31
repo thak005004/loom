@@ -44,17 +44,35 @@ a repeated REMOVED is just a second no-op pop), so it's safe to attach
 RePlanner and WorldState to the same bus in either order. It doesn't
 need to be the *same* WorldState instance a caller happens to be
 reading elsewhere, but in practice it is.
+
+Policy loop: if constructed with a `policy`, RePlanner sources its own
+weights from `policy.select_weights()` immediately before *every*
+solve() call — full or incremental — and scores every completed re-plan
+via `reward_fn` (compute_reward by default) and feeds it back through
+`policy.update()`. This used to be the caller's job (dashboard/app.py
+did it by hand around every button click) — which meant it only
+happened for whatever a UI layer remembered to wire up, and nothing
+else: seeding traffic, tests, any other caller got default weights and
+never trained the bandit at all. Making it a property of RePlanner
+itself means every re-plan, from any caller, closes the loop the same
+way. Without a `policy` (the default), RePlanner falls back to the
+plain `weights` dict exactly as before — existing callers that don't
+pass one see no behavior change.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from orchestrator.events.bus import EventBus
 from orchestrator.events.types import ChangeKind, Event, EventType
 from orchestrator.fleet.state import WorldState
-from orchestrator.scheduling.solver import DEFAULT_CAPACITY_BY_KIND, ScheduleResult, solve, solve_world
+from orchestrator.policy.bandit_policy import BanditPolicy, context_from_world
+from orchestrator.policy.reward import compute_reward
+from orchestrator.scheduling.solver import Assignment, DEFAULT_CAPACITY_BY_KIND, ScheduleResult, solve, solve_world
+
+RewardFn = Callable[[ScheduleResult, List[Dict[str, Any]], List[Dict[str, Any]]], float]
 
 # Rule name -> the job_type it constrains, and (optionally) the
 # capability it imposes on matching jobs going forward. Section 4's
@@ -83,24 +101,68 @@ RULE_EFFECTS: Dict[str, Dict[str, Optional[str]]] = {
 
 
 class RePlanner:
-    def __init__(self, world: WorldState, weights: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        world: WorldState,
+        weights: Optional[Dict[str, Any]] = None,
+        policy: Optional[BanditPolicy] = None,
+        reward_fn: Optional[RewardFn] = None,
+    ) -> None:
         self.world = world
         self.weights: Dict[str, Any] = dict(weights or {})
+        self.policy = policy
+        self.reward_fn: RewardFn = reward_fn or compute_reward
         self.assignments: Dict[str, str] = {}
 
         self.last_full_solve_seconds: Optional[float] = None
         self.last_replan_seconds: Optional[float] = None
+        self.last_reward: Optional[float] = None
+        # Incremented once per *actual* solve() call, full or incremental
+        # — not per event. Lets a caller (e.g. the dashboard) tell
+        # whether the event it just published required a real re-plan
+        # or was a no-op, without duplicating reward/weight logic to
+        # find out: compare this before/after publishing.
+        self.solve_count: int = 0
 
     def attach(self, bus: EventBus) -> None:
         bus.subscribe(self.on_event)
+
+    def _current_weights(self) -> Dict[str, Any]:
+        """Sourced fresh from the policy immediately before every solve()
+        call, full or incremental — not read from a dict a caller had to
+        remember to keep in sync. Falls back to the plain `weights` dict
+        when no policy was provided, unchanged from the old behavior."""
+        if self.policy is not None:
+            return self.policy.select_weights(context_from_world(self.world))
+        return self.weights
+
+    def _current_schedule_result(self) -> ScheduleResult:
+        """The whole running assignment, wrapped for scoring — not just
+        whatever slice the last incremental re-plan touched. A tiny slice
+        (one job) would score as "everything else unassigned," which
+        misrepresents how the overall plan is actually doing."""
+        assignments = [Assignment(job_id=jid, device_id=did) for jid, did in self.assignments.items()]
+        assigned_ids = set(self.assignments)
+        unassigned = [j["job_id"] for j in self.world.open_jobs() if j["job_id"] not in assigned_ids]
+        return ScheduleResult(status="CURRENT", assignments=assignments, unassigned_job_ids=unassigned)
+
+    def _score_and_update(self) -> None:
+        self.solve_count += 1
+        if self.policy is None:
+            return
+        result = self._current_schedule_result()
+        reward = self.reward_fn(result, self.world.open_jobs(), self.world.available_devices())
+        self.policy.update(reward)
+        self.last_reward = reward
 
     # -- full solve, for the Section 11 timing comparison and initial seeding --
 
     def full_solve(self) -> ScheduleResult:
         start = time.perf_counter()
-        result = solve_world(self.world, **self.weights)
+        result = solve_world(self.world, **self._current_weights())
         self.last_full_solve_seconds = time.perf_counter() - start
         self.assignments = {a.job_id: a.device_id for a in result.assignments}
+        self._score_and_update()
         return result
 
     # -- incremental path --
@@ -110,6 +172,12 @@ class RePlanner:
         self.world.apply_event(event)  # idempotent; safe even if world already saw this event
         result = self._dispatch(event)
         self.last_replan_seconds = time.perf_counter() - start
+        if result is not None:
+            # None means no solve() actually ran (a routine no-op tick, a
+            # job closing, a rule with nothing to do) — nothing to score,
+            # and no weights were selected for it, so calling update()
+            # would attribute this round's outcome to a stale decision.
+            self._score_and_update()
         return result
 
     def _dispatch(self, event: Event) -> Optional[ScheduleResult]:
@@ -138,7 +206,7 @@ class RePlanner:
         pending_jobs = [j for j in self.world.open_jobs() if j["job_id"] not in self.assignments]
         if not pending_jobs:
             return None
-        result = solve(pending_jobs, [device], **self.weights)
+        result = solve(pending_jobs, [device], **self._current_weights())
         self._merge(result, {j["job_id"] for j in pending_jobs})
         return result
 
@@ -157,7 +225,7 @@ class RePlanner:
             return None
         slice_ids = {j["job_id"] for j in slice_jobs}
         candidates = self._candidate_devices_for(slice_jobs, exclude_job_ids=slice_ids)
-        result = solve(slice_jobs, candidates, **self.weights)
+        result = solve(slice_jobs, candidates, **self._current_weights())
         self._merge(result, slice_ids)
         return result
 
@@ -172,7 +240,7 @@ class RePlanner:
         candidates = self._candidate_devices_for(slice_jobs, exclude_job_ids=slice_ids)
         if device is not None and device not in candidates:
             candidates = candidates + [device]
-        result = solve(slice_jobs, candidates, **self.weights)
+        result = solve(slice_jobs, candidates, **self._current_weights())
         self._merge(result, {j["job_id"] for j in slice_jobs})
         return result
 
@@ -186,7 +254,7 @@ class RePlanner:
             self.assignments.pop(job_id, None)
             return None
         candidates = self._candidate_devices_for([job], exclude_job_ids={job_id})
-        result = solve([job], candidates, **self.weights)
+        result = solve([job], candidates, **self._current_weights())
         self._merge(result, {job_id})
         return result
 
@@ -207,7 +275,7 @@ class RePlanner:
                 job["requires"] = new_requires
         affected_ids = {j["job_id"] for j in affected}
         candidates = self._candidate_devices_for(affected, exclude_job_ids=affected_ids)
-        result = solve(affected, candidates, **self.weights)
+        result = solve(affected, candidates, **self._current_weights())
         self._merge(result, affected_ids)
         return result
 

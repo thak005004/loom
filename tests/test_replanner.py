@@ -12,6 +12,7 @@ import time
 
 from orchestrator.events.types import ChangeKind, Event, EventType
 from orchestrator.fleet.state import WorldState
+from orchestrator.policy.bandit_policy import BanditPolicy
 from orchestrator.scheduling.replanner import RePlanner
 
 
@@ -165,6 +166,76 @@ def test_closed_job_is_dropped_with_no_solver_call():
 
     assert result is None
     assert "job-A" not in replanner.assignments
+
+
+def test_incremental_replan_feeds_reward_back_into_the_bandit_policy():
+    """The gap that used to exist: RePlanner had no reference to any
+    policy, so nothing about an incremental re-plan ever trained the
+    bandit unless some caller (the dashboard) remembered to select
+    weights and call update() by hand — and nothing enforced that. Now
+    RePlanner sources weights from the policy and scores every real
+    solve itself. This proves it for two different incremental event
+    kinds, not just a full solve()."""
+    world = WorldState()
+    _seed_device(world, "dev-1", "npu")
+    _seed_device(world, "dev-2", "npu")
+    _seed_job(world, "job-A", requires="npu")
+    _seed_job(world, "job-B", requires="npu")
+
+    policy = BanditPolicy(rng=random.Random(1))
+    update_calls = []
+    real_update = policy.update
+
+    def spy_update(reward):
+        update_calls.append(reward)
+        real_update(reward)
+
+    policy.update = spy_update
+
+    replanner = RePlanner(world, policy=policy)
+    replanner.assignments = {"job-A": "dev-1", "job-B": "dev-2"}
+    theta_before = [row[:] for row in policy.theta]
+
+    # incremental re-plan #1: resource_changed / removed
+    result1 = replanner.on_event(
+        _resource_event("dev-1", ChangeKind.REMOVED, kind="npu", battery=0.0, load=0.0, connected=False)
+    )
+    assert result1 is not None  # a real solve happened, not a no-op
+    assert len(update_calls) == 1
+    assert isinstance(update_calls[0], float)
+    assert 0.0 <= update_calls[0] <= 1.0
+    assert policy.last_arm_index is not None
+    assert replanner.last_reward == update_calls[0]
+
+    # incremental re-plan #2: a different kind of event — demand_changed / changed
+    result2 = replanner.on_event(_demand_event("job-B", ChangeKind.CHANGED, priority="urgent"))
+    assert result2 is not None
+    assert len(update_calls) == 2
+    assert isinstance(update_calls[1], float)
+    assert 0.0 <= update_calls[1] <= 1.0
+
+    # not just called — actually trained the policy, not a no-op update
+    assert policy.theta != theta_before
+
+
+def test_routine_no_op_event_does_not_call_policy_update():
+    """A no-op branch (routine telemetry tick) never selects weights, so
+    it must never score/update either — otherwise the outcome would be
+    attributed to whatever the *previous* round happened to select."""
+    world = WorldState()
+    _seed_device(world, "dev-1", "gpu", battery=80.0)
+
+    policy = BanditPolicy(rng=random.Random(2))
+    update_calls = []
+    policy.update = lambda reward: update_calls.append(reward)
+
+    replanner = RePlanner(world, policy=policy)
+    result = replanner.on_event(
+        _resource_event("dev-1", ChangeKind.CHANGED, kind="gpu", battery=79.0, load=0.25, connected=True)
+    )
+
+    assert result is None
+    assert update_calls == []
 
 
 # -- timing: Section 11's "full re-solve vs incremental re-plan" --

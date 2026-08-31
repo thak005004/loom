@@ -5,6 +5,12 @@ bandit policy/reward loop. Nothing here re-implements scheduling logic;
 it only looks up real field values to construct raw records and wires
 button clicks to calls already covered by the test suite.
 
+RePlanner is constructed with `policy=` here, so it sources weights and
+feeds reward back into the bandit *itself*, on every solve — this file
+no longer does that bookkeeping by hand (it used to, and that was the
+gap: only whatever a UI layer remembered to wire up ever trained the
+bandit; see RePlanner's own module docstring for the full story).
+
 Run with: streamlit run dashboard/app.py
 """
 
@@ -23,11 +29,10 @@ from orchestrator.events.types import ChangeKind, Event, EventType
 from orchestrator.fleet.state import WorldState
 from orchestrator.llm.client import AnthropicLLMClient
 from orchestrator.parsing.nl_parser import parse_demand_event
-from orchestrator.policy.bandit_policy import ARM_NAMES, BanditPolicy, context_from_world
+from orchestrator.policy.bandit_policy import ARM_NAMES, BanditPolicy
 from orchestrator.policy.fairness import load_distribution_stdev
-from orchestrator.policy.reward import compute_reward
 from orchestrator.scheduling.replanner import RePlanner
-from orchestrator.scheduling.solver import Assignment, ScheduleResult, solve_world
+from orchestrator.scheduling.solver import solve_world
 from orchestrator.streams.context_stream import RULES, ContextStreamAdapter
 from orchestrator.streams.demand_stream import DemandStreamAdapter
 from orchestrator.streams.maintenance_stream import MaintenanceStreamAdapter
@@ -49,9 +54,9 @@ def init_state() -> None:
     registry = StreamRegistry(bus)
     world = WorldState()
     world.attach(bus)
-    replanner = RePlanner(world)
-    replanner.attach(bus)
     policy = BanditPolicy(rng=random.Random())
+    replanner = RePlanner(world, policy=policy)
+    replanner.attach(bus)
 
     # Deliberately just the original 3 streams at startup (Section 12,
     # demo beat 1) — maintenance/override are registered live from the
@@ -63,6 +68,10 @@ def init_state() -> None:
     registry.register_stream(demand)
     registry.register_stream(context)
 
+    # Every incremental re-plan triggered during this seeding traffic
+    # now sources real (if early/untrained) bandit weights and trains
+    # the policy on the outcome — RePlanner does that itself now, not
+    # this loop.
     for _ in range(FLEET_SIZE * 3):
         telemetry.emit(telemetry.next_raw())
     for _ in range(FLEET_SIZE):
@@ -70,11 +79,7 @@ def init_state() -> None:
     for _ in range(3):
         context.emit(context.next_raw())
 
-    weights = policy.select_weights(context_from_world(world))
-    replanner.weights = weights
     replanner.full_solve()
-    reward = compute_reward(_current_result(replanner, world), world.open_jobs(), world.available_devices())
-    policy.update(reward)
 
     st.session_state.update(
         initialized=True,
@@ -89,7 +94,7 @@ def init_state() -> None:
         chat_log=[],
         parse_log=[],
     )
-    _record_round(policy, weights, reward, world, replanner)
+    _record_round(policy, replanner, world)
 
 
 @st.cache_resource
@@ -110,16 +115,6 @@ def get_llm_client() -> Optional[AnthropicLLMClient]:
 # -- shared helpers (reused by every disruption button, no per-button logic) --
 
 
-def _current_result(replanner: RePlanner, world: WorldState) -> ScheduleResult:
-    """Wraps replanner's own running assignment map into a ScheduleResult
-    so compute_reward() can score the *whole* current plan, not just
-    whatever slice the last incremental re-plan touched."""
-    assignments = [Assignment(job_id=jid, device_id=did) for jid, did in replanner.assignments.items()]
-    assigned_ids = set(replanner.assignments)
-    unassigned = [j["job_id"] for j in world.open_jobs() if j["job_id"] not in assigned_ids]
-    return ScheduleResult(status="CURRENT", assignments=assignments, unassigned_job_ids=unassigned)
-
-
 def _time_full_solve(world: WorldState, weights: Dict[str, Any]) -> float:
     """Times solve_world() for the Section 11 comparison only — the
     result is discarded, replanner.assignments is never touched by it."""
@@ -128,19 +123,22 @@ def _time_full_solve(world: WorldState, weights: Dict[str, Any]) -> float:
     return time.perf_counter() - start
 
 
-def _record_round(policy: BanditPolicy, weights: Dict[str, Any], reward: float, world: WorldState, replanner: RePlanner) -> None:
+def _record_round(policy: BanditPolicy, replanner: RePlanner, world: WorldState) -> None:
     """Appends one round to the weight-history the Adaptive Policy tab
     charts — including the fairness metric (Section 11: "workload
     distribution across devices, before vs. after the policy adapts"),
     tracked every round so that trend is directly visible, not just
-    inferable from the reward."""
+    inferable from the reward. Only call this right after a *real*
+    solve (check replanner.solve_count first) — policy.last_arm_index
+    and replanner.last_reward reflect whatever RePlanner's own internal
+    policy loop most recently did, which is only meaningful then."""
     st.session_state.weight_history.append(
         {
             "round": len(st.session_state.weight_history),
             "arm": ARM_NAMES[policy.last_arm_index],
-            "reward": reward,
+            "reward": replanner.last_reward,
             "fairness": load_distribution_stdev(world.available_devices(), replanner.assignments),
-            **weights,
+            **dict(policy.arms[policy.last_arm_index]),
         }
     )
 
@@ -150,24 +148,37 @@ def run_disruption(emit_fn: Callable[[], Optional[Event]]) -> None:
     replanner = st.session_state.replanner
     policy = st.session_state.policy
 
-    weights = policy.select_weights(context_from_world(world))
-    replanner.weights = weights
-
+    solves_before = replanner.solve_count
     event = emit_fn()
     if event is None:
         st.warning("Nothing to disrupt right now.")
         return
 
-    reward = compute_reward(_current_result(replanner, world), world.open_jobs(), world.available_devices())
-    policy.update(reward)
+    if replanner.solve_count == solves_before:
+        # RePlanner published/applied the event but its dispatcher found
+        # nothing to re-solve (e.g. a rule fired but no matching jobs
+        # existed) — no fresh weights were selected, nothing to score.
+        st.session_state.last_timing = {
+            "event_type": event.type.value,
+            "change_kind": event.change_kind.value,
+            "replan_seconds": replanner.last_replan_seconds,
+            "full_solve_seconds": None,
+        }
+        st.rerun()
+        return
 
+    # The weights RePlanner just used internally for this round, read
+    # back from the policy rather than re-selected here — re-selecting
+    # would both waste an exploration draw and risk scoring a *different*
+    # round than the one that actually just happened.
+    weights = dict(policy.arms[policy.last_arm_index])
     st.session_state.last_timing = {
         "event_type": event.type.value,
         "change_kind": event.change_kind.value,
         "replan_seconds": replanner.last_replan_seconds,
         "full_solve_seconds": _time_full_solve(world, weights),
     }
-    _record_round(policy, weights, reward, world, replanner)
+    _record_round(policy, replanner, world)
     # Streamlit renders top-to-bottom in one pass per interaction, and
     # the state overview (metrics/tables) is drawn *before* this handler
     # runs — without forcing an immediate second pass, the visible
@@ -196,9 +207,7 @@ def parse_pending_requests() -> None:
         st.session_state.parse_log = ["No unparsed requests right now."]
         return
 
-    weights = policy.select_weights(context_from_world(world))
-    replanner.weights = weights
-
+    solves_before = replanner.solve_count
     log: List[str] = []
     for job in pending:
         raw_event = Event(type=EventType.DEMAND_CHANGED, change_kind=ChangeKind.ADDED, source="demand", payload=dict(job))
@@ -211,15 +220,22 @@ def parse_pending_requests() -> None:
             text = job.get("text", "")
             log.append(f"🚫 `{job['job_id']}`: couldn't confidently classify \"{text}\" — left unparsed, not guessed at.")
             continue
-        bus.publish(parsed_event)  # flows through WorldState + RePlanner exactly like any other event
+        # Publishing (not adapter.emit()) is deliberate here: parse_demand_event
+        # already produced a finished Event, so this goes straight to the
+        # bus — RePlanner picks it up via its own subscription exactly
+        # like any stream-produced event, sourcing weights and scoring
+        # the outcome itself, same as every other event in this file.
+        bus.publish(parsed_event)
         log.append(f"✅ `{job['job_id']}`: parsed as **{parsed_event.payload['job_type']} / {parsed_event.payload['priority']}**.")
 
     st.session_state.parse_log = log
 
-    reward = compute_reward(_current_result(replanner, world), world.open_jobs(), world.available_devices())
-    policy.update(reward)
-    _record_round(policy, weights, reward, world, replanner)
-    st.rerun()  # see run_disruption()'s comment on why this is needed
+    # Each successfully-parsed job triggered its own real re-plan (and
+    # its own policy round) inside RePlanner already; this just records
+    # one chart point reflecting the *last* of those rounds, for the UI.
+    if replanner.solve_count > solves_before:
+        _record_round(policy, replanner, world)
+    st.rerun()
 
 
 # -- disruption actions: each reuses an existing adapter's parse()/emit(), nothing new --
@@ -428,9 +444,12 @@ def _render_disruptions_tab() -> None:
         t = st.session_state.last_timing
         st.divider()
         st.markdown(f"**Last disruption:** `{t['event_type']}` / `{t['change_kind']}`")
-        tc1, tc2 = st.columns(2)
-        tc1.metric("Incremental re-plan", f"{t['replan_seconds'] * 1000:.2f} ms")
-        tc2.metric("Full re-solve (for comparison)", f"{t['full_solve_seconds'] * 1000:.2f} ms")
+        if t["full_solve_seconds"] is None:
+            st.caption(f"No re-plan was needed for this one (dispatch took {t['replan_seconds'] * 1000:.2f} ms) — nothing matched.")
+        else:
+            tc1, tc2 = st.columns(2)
+            tc1.metric("Incremental re-plan", f"{t['replan_seconds'] * 1000:.2f} ms")
+            tc2.metric("Full re-solve (for comparison)", f"{t['full_solve_seconds'] * 1000:.2f} ms")
     else:
         st.caption("Trigger a disruption above to see the re-plan latency comparison.")
 
