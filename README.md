@@ -2,19 +2,19 @@
 
 A scheduler that assigns jobs to a fleet of devices, learns from its own decisions, and reacts to change in milliseconds instead of recomputing everything.
 
-Devices drop offline, urgent jobs jump the line, rules change. Most schedulers either use fixed rules that never improve, or special-case every scenario and break the first time something unplanned happens. Loom does neither: it learns from outcomes, and it handles every kind of change through one general mechanism instead of a pile of special cases.
+Devices drop offline, urgent jobs jump the line, rules change. Most schedulers use fixed rules that never improve, or special-case every scenario and break the first time something unplanned happens. Loom does neither, and it doesn't wait on a person to notice and patch in a fix: the moment something changes, it's already adjusting, on its own.
 
 ## How it works
 
-A contextual bandit picks the scheduler's priority weights (urgency vs. battery vs. load) based on current conditions, watches how each decision plays out, and adjusts. It never stops learning. Proof, not just a claim: two identical policies, rewarded for opposite choices, learned to make opposite decisions.
+- **It learns.** A contextual bandit picks the scheduler's priority weights (urgency vs. battery vs. load) based on current conditions, watches how each decision plays out, and adjusts. It never stops learning. Proof, not just a claim: two identical policies, rewarded for opposite choices, learned to make opposite decisions.
 
-Every change, whatever it is, resolves to one of three shapes: resource changed, demand changed, rule changed. The scheduler only re-solves the part actually affected, not the whole plan. A full recompute slows down as the fleet grows; incremental replanning stays fast no matter the fleet size.
+- **It reacts to any kind of change, not just the ones someone thought of.** Every change resolves to one of three shapes: resource changed, demand changed, rule changed. The scheduler only re-solves the part actually affected. A full recompute slows down as the fleet grows; incremental replanning stays fast no matter the fleet size.
 
-New data sources plug in without touching existing code, just implement one interface and register. Verified live: adding a source mid-run, with zero other code touched.
+- **New data sources plug in without touching existing code.** Any source just implements one interface and registers itself. Verified live: adding a source mid-run, zero other code touched.
 
-Categories are pluggable the same way sources are: device kinds and job requirements were never a fixed enum, just a plain string match, so a brand-new category the code has never seen gets scheduled correctly by the real solver and replanner with zero changes elsewhere, proven with a device kind that appears nowhere else in the codebase (`tests/test_pluggable_categories.py`). Loom also checks what it *could* do, not just what's assigned: a live feasibility layer reports which categories the current fleet can actually handle right now, updating the instant a device joins, drops, or fills up (`fleet/feasibility.py`, `tests/test_feasibility.py`).
+- **New categories work the same way.** Device kinds and job requirements are just string matches, not a fixed list, so a brand-new category the code has never seen gets scheduled correctly with zero changes elsewhere. There's also a live feasibility check: what could the current fleet actually handle right now, not just what's already assigned.
 
-Job requests can arrive as plain sentences. An LLM structures them, and can say "I don't know" instead of guessing on nonsense input. You can also ask why any decision was made and get an answer grounded in real numbers, not a plausible-sounding guess.
+- **It understands messy input and explains itself.** Job requests can arrive as plain sentences; an LLM structures them, and can say "I don't know" instead of guessing on nonsense. You can ask why any decision was made and get an answer grounded in real numbers.
 
 ## How it fits together
 
@@ -47,7 +47,7 @@ Job requests can arrive as plain sentences. An LLM structures them, and can say 
 
 ## An honest result
 
-Fairness (how evenly work spreads across devices) doesn't improve as the policy learns, it actually got slightly worse across test runs. The reward weights urgent work far above balance, so the policy is optimizing correctly, just not for fairness. A periodic full rebalance would fix it. I didn't build that, and would rather report the real result than a rosier one.
+Fairness (how evenly work spreads across devices) doesn't improve as the policy learns, it got slightly worse across test runs. The reward weights urgent work far above balance, so the policy is optimizing correctly, just not for fairness. A periodic full rebalance would fix it. Didn't build that yet, wanted to report the real result instead.
 
 ## The numbers
 
@@ -58,9 +58,9 @@ Fairness (how evenly work spreads across devices) doesn't improve as the policy 
 
 ## Stack, and why
 
-- **Google OR-Tools (CP-SAT)** for the actual scheduling solver
-- **A hand-rolled contextual bandit**, not a heavier RL setup, easier to debug and reason about, and this is genuinely how similar problems get solved in production elsewhere
-- **Anthropic's API** for parsing and explanations, with a rule-based fallback so the whole thing runs with zero setup and no key
+- **Google OR-Tools (CP-SAT)** for the scheduling solver
+- **A hand-rolled contextual bandit**, not a heavier RL setup, easier to debug and how similar problems get solved in production elsewhere
+- **Anthropic's API** for parsing and explanations, with a rule-based fallback so it runs with zero setup and no key
 - **Streamlit** for the dashboard, **pytest** for the tests
 
 ## Running it
