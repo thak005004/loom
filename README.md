@@ -42,7 +42,7 @@ The replanner only re-decides the piece of the plan actually touched.
 | Rule changes (e.g. job type now needs a GPU) | Rule changed | Reassigns only the jobs that rule actually affects |
 | Human operator manually reassigns something | Demand or resource changed | Handled identically to an automated change |
 
-Full recompute time grows sharply with fleet size; the incremental path stays flat, since it only touches what changed (numbers in Section 7).
+Full recompute time grows sharply with fleet size; the incremental path stays flat, since it only touches what changed (numbers in Section 8).
 
 ### 2c. Any number of data sources, pluggable at any time
 
@@ -62,7 +62,40 @@ The same model explains any decision in plain language, grounded in the real num
 
 ---
 
-## 4. An honest result: what the system does and doesn't optimize for
+## 4. How it fits together
+
+```
+                     Multiple data sources
+                (devices, jobs, rules, more)
+                              |
+                              v
+                          Event bus
+              (normalizes every kind of change)
+                              |
+                              v
+                         World state
+                    (live devices and jobs)
+                              |
+                  +-----------+-----------+
+                  v                       v
+          Adaptive policy  <----->    Scheduler
+        (learns from outcomes)   (assigns jobs to devices)
+                  |                       |
+                  +-----------+-----------+
+                              v
+                   Incremental re-planner
+                    (reacts to any change)
+                              |
+                              v
+                Explainer + live dashboard
+              (shows state, answers "why")
+```
+
+Data flows down: sources feed the event bus, which keeps world state current. The policy and scheduler work together in a loop (the policy sets priorities, the scheduler assigns work, outcomes feed back to the policy). Any change triggers the re-planner, which only touches what's actually affected, and everything surfaces in the dashboard.
+
+---
+
+## 5. An honest result: what the system does and doesn't optimize for
 
 We tested whether fairness (how evenly work spreads across devices) improves as the policy adapts. It doesn't, reliably: across multiple runs, load distribution trended slightly worse over time in steady-state operation, not better.
 
@@ -72,7 +105,7 @@ The honest claim: the policy demonstrably adapts and improves at the objective i
 
 ---
 
-## 5. Architecture
+## 6. Architecture
 
 ```
 Five pluggable data sources         Shared event language          Live current state
@@ -99,34 +132,34 @@ Five pluggable data sources         Shared event language          Live current 
 
 ---
 
-## 6. Fit with Intel's direction
+## 7. Fit with Intel's direction
 
 The heterogeneous fleet mirrors where OpenVINO's roadmap is headed: task-based scheduling across CPU/GPU/NPU instead of targeting hardware manually. Parsing and matching run on-device via OpenVINO; the CP-SAT solves and learning loop are the steady, latency-sensitive workload Xeon and AMX are built for. The pluggable-services shape mirrors OPEA's reference architecture.
 
 ---
 
-## 7. What's tested, and the real numbers
+## 8. What's tested, and the real numbers
 
 - **76 automated tests**: the scheduler never assigns a device to work it can't handle; the replanner scopes correctly to the affected slice for every kind of change; the policy's behavior measurably shifts based on real outcomes, for both full and incremental decisions; a new data source can be added while the system is running with zero other code touched; the parser abstains rather than guesses on input it can't confidently classify.
 - **Incremental replan latency**: roughly 5 to 8.5ms, scaling with how many jobs were actually affected, not with fleet size.
 - **Full recompute latency**: roughly 0.10s at 50 devices, growing past a second at 150 devices.
 - **Event throughput**: roughly 80,000 to 86,000 events/sec, stable from 1,000 to 50,000 events.
-- **Fairness**: measured and reported honestly (Section 4); currently monitored, not optimized.
+- **Fairness**: measured and reported honestly (Section 5); currently monitored, not optimized.
 
 ---
 
-## 8. What's next
+## 9. What's next
 
 Deliberately not built, each a real multi-day undertaking:
 
-- Periodic rebalancing solves, for the fairness gap in Section 4
+- Periodic rebalancing solves, for the fairness gap in Section 5
 - A meta-controller choosing between a fast approximate match and a full solve, by system load
 - A decentralized alternative where devices bid for jobs based on their own state
 - A separate fairness-auditing check, independent of the main scheduling objective
 
 ---
 
-## 9. Running it
+## 10. Running it
 
 ```bash
 pip install -e .
