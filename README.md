@@ -73,4 +73,6 @@ pytest
 streamlit run dashboard/app.py
 ```
 
+The last command starts a local server and prints a URL, normally `http://localhost:8501`. Open that in a browser to use the dashboard. Leave the command running in its terminal; press Ctrl+C there to stop it.
+
 No API key needed. Without `ANTHROPIC_API_KEY`, parsing and explanations fall back to rule-based logic, with a banner saying so.
