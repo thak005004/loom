@@ -142,8 +142,10 @@ Deliberately not built, each a real multi-day undertaking:
 
 ## 9. Running it
 
+Requires Python >=3.10.
+
 ```bash
-pip install -e .
+pip install -e ".[dev]"
 pytest
 streamlit run dashboard/app.py
 ```
