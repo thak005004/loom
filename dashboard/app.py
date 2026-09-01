@@ -231,20 +231,20 @@ def parse_pending_requests() -> None:
         raw_event = Event(type=EventType.DEMAND_CHANGED, change_kind=ChangeKind.ADDED, source="demand", payload=dict(job))
         try:
             parsed_event = parse_demand_event(raw_event, llm)
-        except Exception as exc:  # network/rate-limit error mid-demo — don't crash the page
-            log.append(f"⚠️ `{job['job_id']}`: parser call failed ({exc}) — left unparsed.")
+        except Exception as exc:  # network/rate-limit error mid-demo, don't crash the page
+            log.append(f"`{job['job_id']}`: parser call failed ({exc}). Left unparsed.")
             continue
         if parsed_event is None:
             text = job.get("text", "")
-            log.append(f"🚫 `{job['job_id']}`: couldn't confidently classify \"{text}\" — left unparsed, not guessed at.")
+            log.append(f"`{job['job_id']}`: couldn't confidently classify \"{text}\". Left unparsed, not guessed at.")
             continue
         # Publishing (not adapter.emit()) is deliberate here: parse_demand_event
         # already produced a finished Event, so this goes straight to the
-        # bus — RePlanner picks it up via its own subscription exactly
+        # bus, RePlanner picks it up via its own subscription exactly
         # like any stream-produced event, sourcing weights and scoring
         # the outcome itself, same as every other event in this file.
         bus.publish(parsed_event)
-        log.append(f"✅ `{job['job_id']}`: parsed as **{parsed_event.payload['job_type']} / {parsed_event.payload['priority']}**.")
+        log.append(f"`{job['job_id']}`: parsed as **{parsed_event.payload['job_type']} / {parsed_event.payload['priority']}**.")
 
     st.session_state.parse_log = log
 
@@ -348,9 +348,6 @@ def register_override_live() -> None:
 # -- view helpers --
 
 
-_KIND_ICON = {"cpu": "🖥️ CPU", "gpu": "🎮 GPU", "npu": "🧠 NPU"}
-
-
 def _device_rows(world: WorldState, replanner: RePlanner) -> List[Dict[str, Any]]:
     jobs_by_device: Dict[str, List[str]] = {}
     for job_id, device_id in replanner.assignments.items():
@@ -362,18 +359,15 @@ def _device_rows(world: WorldState, replanner: RePlanner) -> List[Dict[str, Any]
         rows.append(
             {
                 "Device": device_id,
-                "Type": _KIND_ICON.get(device.get("kind"), device.get("kind")),
+                "Type": (device.get("kind") or "-").upper(),
                 "Battery": round(device.get("battery", 0.0)),
                 "Load": round(device.get("load", 0.0) * 100),
-                "Status": "🟢 online" if connected else "🔴 offline",
-                "Reliability": "✅ nominal" if reliability == "nominal" else "⚠️ degraded",
-                "Assigned jobs": ", ".join(sorted(jobs_by_device.get(device_id, []))) or "—",
+                "Status": "online" if connected else "offline",
+                "Reliability": "nominal" if reliability == "nominal" else "degraded",
+                "Assigned jobs": ", ".join(sorted(jobs_by_device.get(device_id, []))) or "-",
             }
         )
     return rows
-
-
-_PRIORITY_LABEL = {"urgent": "🔴 urgent", "normal": "⚪ normal"}
 
 
 def _job_rows(world: WorldState, replanner: RePlanner) -> List[Dict[str, Any]]:
@@ -381,16 +375,17 @@ def _job_rows(world: WorldState, replanner: RePlanner) -> List[Dict[str, Any]]:
     for job_id, job in sorted(world.jobs.items()):
         job_type = job.get("job_type")
         if job_type is None and job.get("structured") is False:
-            job_type = "💬 unparsed request"
+            job_type = "unparsed request"
         priority = job.get("priority")
         assigned = replanner.assignments.get(job_id)
+        requires = job.get("requires")
         rows.append(
             {
                 "Job": job_id,
-                "Type": job_type or "—",
-                "Priority": _PRIORITY_LABEL.get(priority, priority or "—"),
-                "Requires": _KIND_ICON.get(job.get("requires"), "any device"),
-                "Assigned to": assigned or "⏳ unassigned",
+                "Type": job_type or "-",
+                "Priority": priority or "-",
+                "Requires": requires.upper() if requires else "any device",
+                "Assigned to": assigned or "unassigned",
             }
         )
     return rows
@@ -404,11 +399,25 @@ _DEVICE_COLUMN_CONFIG = {
 }
 
 
-def _hide_streamlit_chrome() -> None:
-    # Cosmetic only: hides the default hamburger menu and footer so the
-    # page reads as a finished dashboard rather than a bare dev preview.
-    # Purely presentational — no app behavior depends on this.
-    st.markdown("<style>#MainMenu, footer {visibility: hidden;}</style>", unsafe_allow_html=True)
+def _apply_page_style() -> None:
+    # Cosmetic only, no app behavior depends on this. Hides the default
+    # hamburger menu and footer, tightens spacing, and sets a plain,
+    # consistent type scale so the page reads as a finished internal
+    # tool rather than a bare dev preview.
+    st.markdown(
+        """
+        <style>
+        #MainMenu, footer, header {visibility: hidden;}
+        .block-container {padding-top: 2rem; max-width: 1200px;}
+        h1 {font-weight: 600; letter-spacing: -0.02em;}
+        h2, h3 {font-weight: 600;}
+        [data-testid="stMetricValue"] {font-weight: 600;}
+        [data-testid="stCaptionContainer"] {color: #8a8f98;}
+        div[data-testid="stButton"] > button {border-radius: 6px;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def _render_state_overview(world: WorldState, replanner: RePlanner, registry: StreamRegistry) -> None:
@@ -421,7 +430,7 @@ def _render_state_overview(world: WorldState, replanner: RePlanner, registry: St
     )
     m2.metric("Devices", len(world.devices), help="CPU/GPU/NPU devices currently known to the fleet.")
     m3.metric("Open jobs", len(world.jobs), help="Jobs currently pending assignment or already running.")
-    st.caption("🔌 Streams online:  " + "  ".join(f"`{s}`" for s in sorted(st.session_state.streams)))
+    st.caption("Streams online: " + ", ".join(f"`{s}`" for s in sorted(st.session_state.streams)))
 
     st.subheader("Fleet")
     st.dataframe(_device_rows(world, replanner), width="stretch", hide_index=True, column_config=_DEVICE_COLUMN_CONFIG)
@@ -433,73 +442,74 @@ def _render_state_overview(world: WorldState, replanner: RePlanner, registry: St
     st.caption(
         "Capability, not commitment: for every category of work the fleet has ever been asked about or could "
         "offer, does at least one connected device with spare capacity exist right now? Updates live as "
-        "devices join, drop, or fill up — independent of what's actually queued."
+        "devices join, drop, or fill up, independent of what's actually queued."
     )
     feasibility = feasible_categories(world)
     if feasibility:
         ordered = sorted(feasibility.items(), key=lambda kv: (kv[0] is None, kv[0] or ""))
         cols = st.columns(min(4, len(ordered)))
         for i, (category, feasible) in enumerate(ordered):
-            label = "Unconstrained (any device)" if category is None else category
+            label = "unconstrained (any device)" if category is None else category
+            status = ":green[available]" if feasible else ":red[unavailable]"
             with cols[i % len(cols)]:
-                st.markdown(f"{'✅' if feasible else '❌'} `{label}`")
+                st.markdown(f"`{label}` {status}")
 
 
 def _render_disruptions_tab() -> None:
     st.caption(
-        "Each button below fires a real event through the same pipeline the live streams use — nothing "
+        "Each button below fires a real event through the same pipeline the live streams use. Nothing "
         "here is a separate simulation. Watch the re-plan latency at the bottom: only the affected slice "
         "of the plan gets re-solved, not the whole fleet."
     )
 
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        if st.button("💀 Kill a random device", width="stretch"):
+        if st.button("Kill a random device", width="stretch"):
             run_disruption(kill_random_device)
         st.caption("A device goes offline mid-job.")
     with c2:
-        if st.button("🌱 Device joins", width="stretch"):
+        if st.button("Device joins", width="stretch"):
             run_disruption(add_random_device)
         st.caption("A new device (random kind) joins the fleet.")
     with c3:
-        if st.button("🚨 Inject an urgent job", width="stretch"):
+        if st.button("Inject an urgent job", width="stretch"):
             run_disruption(inject_urgent_job)
         st.caption("A new high-priority request arrives.")
     with c4:
-        if st.button("📋 Trigger a rule change", width="stretch"):
+        if st.button("Trigger a rule change", width="stretch"):
             run_disruption(trigger_rule_change)
         st.caption("A policy rule is introduced mid-run.")
 
     st.divider()
-    st.markdown("**Register a new stream, live** — the pluggability claim, actually exercised, not asserted.")
+    st.markdown("**Register a new stream, live.** The pluggability claim, actually exercised, not asserted.")
     rc1, rc2 = st.columns(2)
     with rc1:
         if "maintenance" not in st.session_state.streams:
-            if st.button("🔧 Register maintenance stream", width="stretch"):
+            if st.button("Register maintenance stream", width="stretch"):
                 register_maintenance_live()
             st.caption("Adds a device-reliability feed the system has never seen before.")
         else:
-            if st.button("⚠️ Simulate maintenance issue", width="stretch"):
+            if st.button("Simulate maintenance issue", width="stretch"):
                 m = st.session_state.streams["maintenance"]
                 run_disruption(lambda: m.emit(m.next_raw()))
-            st.caption("✅ Registered — fire a reliability event from it.")
+            st.caption("Registered. Fire a reliability event from it.")
     with rc2:
         if "override" not in st.session_state.streams:
-            if st.button("🧑 Register override stream", width="stretch"):
+            if st.button("Register override stream", width="stretch"):
                 register_override_live()
             st.caption("Adds a stand-in for a human operator's manual actions.")
         else:
-            if st.button("🧑 Simulate operator override", width="stretch"):
+            if st.button("Simulate operator override", width="stretch"):
                 o = st.session_state.streams["override"]
                 run_disruption(lambda: o.emit(o.next_raw()))
-            st.caption("✅ Registered — fire an operator action from it.")
+            st.caption("Registered. Fire an operator action from it.")
 
     if st.session_state.last_timing:
         t = st.session_state.last_timing
         st.divider()
         st.markdown(f"**Last disruption:** `{t['event_type']}` / `{t['change_kind']}`")
         if t["full_solve_seconds"] is None:
-            st.caption(f"No re-plan was needed for this one (dispatch took {t['replan_seconds'] * 1000:.2f} ms) — nothing matched.")
+            st.caption(f"No re-plan was needed for this one (dispatch took {t['replan_seconds'] * 1000:.2f} ms). Nothing matched.")
         else:
             tc1, tc2 = st.columns(2)
             tc1.metric("Incremental re-plan", f"{t['replan_seconds'] * 1000:.2f} ms")
@@ -510,11 +520,11 @@ def _render_disruptions_tab() -> None:
     st.divider()
     st.markdown("**Parse pending natural-language requests**")
     st.caption(
-        "demand_stream passes messy text through untouched — this runs the language parser (Section 3c) "
+        "demand_stream passes messy text through untouched. This runs the language parser (Section 3c) "
         "over whatever's still unparsed. A request the model can't confidently classify is left unparsed "
         "on purpose, with the reason shown below, not guessed at."
     )
-    if st.button("🗣️ Parse pending NL requests"):
+    if st.button("Parse pending NL requests"):
         parse_pending_requests()
     for line in st.session_state.parse_log:
         st.markdown(f"- {line}")
@@ -522,7 +532,7 @@ def _render_disruptions_tab() -> None:
 
 def _render_policy_tab(history: List[Dict[str, Any]]) -> None:
     st.caption(
-        "The solver's objective isn't hand-tuned — a contextual bandit picks the weighting per round based "
+        "The solver's objective isn't hand-tuned. A contextual bandit picks the weighting per round based "
         "on current fleet conditions, and learns from how well each round's plan actually worked out. "
         "Trigger a few disruptions to watch it move."
     )
@@ -535,17 +545,17 @@ def _render_policy_tab(history: List[Dict[str, Any]]) -> None:
                 "battery_bonus_scale": [h["battery_bonus_scale"] for h in history],
             }
         )
-        st.markdown("**urgent_unassigned_penalty**  _(shown separately — different scale)_")
+        st.markdown("**urgent_unassigned_penalty**  _(shown separately, different scale)_")
         st.line_chart({"urgent_unassigned_penalty": [h["urgent_unassigned_penalty"] for h in history]})
     else:
-        st.info("No disruptions yet — trigger one from the Disruptions tab to start seeing the policy adapt.")
+        st.info("No disruptions yet. Trigger one from the Disruptions tab to start seeing the policy adapt.")
 
     a1, a2 = st.columns(2)
     a1.metric("Active strategy", history[-1]["arm"], help="Which of the policy's fixed weight profiles is currently favored.")
     a2.metric("Last round's reward", f"{history[-1]['reward']:.2f}", help="How well the resulting plan scored: capacity respected, load balanced, urgent jobs served.")
 
     st.divider()
-    st.markdown("**Fairness — workload distribution across devices**")
+    st.markdown("**Fairness: workload distribution across devices**")
     st.caption(
         "Standard deviation of per-device utilization (assigned jobs ÷ capacity). Lower means work is "
         "spread more evenly across the fleet; 0 means perfectly even."
@@ -560,8 +570,8 @@ def _render_policy_tab(history: List[Dict[str, Any]]) -> None:
 def _render_explainer_tab(world: WorldState, replanner: RePlanner, policy: BanditPolicy) -> None:
     st.caption(
         "Ask why a job ended up where it did. The answer is grounded in the real numbers behind that "
-        "decision — the job's priority and requirements, the device's battery and load, the policy's "
-        "active weights — not a free-form guess."
+        "decision: the job's priority and requirements, the device's battery and load, and the policy's "
+        "active weights, not a free-form guess."
     )
     llm, _ = get_llm_client()
 
@@ -582,13 +592,13 @@ def _render_explainer_tab(world: WorldState, replanner: RePlanner, policy: Bandi
             st.session_state.chat_log.append((selected_job, answer))
 
     for job_id, answer in reversed(st.session_state.chat_log[-10:]):
-        with st.chat_message("assistant"):
+        with st.container(border=True):
             st.markdown(f"**Why `{job_id}`?**\n\n{answer}")
 
 
 def _render_whatif_tab(world: WorldState, replanner: RePlanner, policy: BanditPolicy) -> None:
     st.caption(
-        "Ask what would happen if a device failed right now — without actually failing it. This clones "
+        "Ask what would happen if a device failed right now, without actually failing it. This clones "
         "the current state, runs it through the same solver and the same active policy weights, and "
         "discards the clone. The real schedule and the bandit's learned weights are never touched."
     )
@@ -607,7 +617,7 @@ def _render_whatif_tab(world: WorldState, replanner: RePlanner, policy: BanditPo
             st.session_state.whatif_log.append((selected_device, result, answer))
 
     for device_id, result, answer in reversed(st.session_state.whatif_log[-10:]):
-        with st.chat_message("assistant"):
+        with st.container(border=True):
             st.markdown(f"**What if `{device_id}` failed?**\n\n{answer}")
             if result.moves:
                 for job_id, new_device in result.moves.items():
@@ -615,8 +625,8 @@ def _render_whatif_tab(world: WorldState, replanner: RePlanner, policy: BanditPo
 
 
 def main() -> None:
-    st.set_page_config(page_title="Loom", layout="wide", page_icon="🛰️")
-    _hide_streamlit_chrome()
+    st.set_page_config(page_title="Loom", layout="wide")
+    _apply_page_style()
     init_state()
 
     world = st.session_state.world
@@ -625,38 +635,38 @@ def main() -> None:
     registry = st.session_state.registry
     history = st.session_state.weight_history
 
-    st.title("🛰️ Loom")
+    st.title("Loom")
     st.caption(
         "Loom is a dynamic, self-improving task orchestrator: a fleet of CPU/GPU/NPU devices fed by "
         "independent data streams, scheduled by a CP-SAT solver whose objective is chosen by a "
-        "self-adapting policy, and re-planned incrementally — not from scratch — whenever something changes."
+        "self-adapting policy, and re-planned incrementally, not recomputed from scratch, whenever "
+        "something changes."
     )
 
     _, is_mock = get_llm_client()
     if is_mock:
         st.info(
-            "Running in offline demo mode (no ANTHROPIC_API_KEY set) — the parser and explainer use "
+            "Running in offline demo mode. No ANTHROPIC_API_KEY is set, so the parser and explainer use "
             "rule-based fallbacks below, not live LLM calls. Set the key and restart to see live model "
-            "behavior.",
-            icon="🔌",
+            "behavior."
         )
 
-    with st.expander("ℹ️  How to read this page"):
+    with st.expander("How to read this page"):
         st.markdown(
             "- **Fleet / Jobs** below are the live state: who's assigned to what, right now.\n"
-            "- **⚡ Disruptions & Streams** tab: trigger a real event and watch the system re-plan in "
-            "milliseconds — and add a brand-new data stream while everything keeps running.\n"
-            "- **📈 Adaptive policy** tab: watch the scheduler's objective weights change on their own as "
+            "- **Disruptions & Streams** tab: trigger a real event and watch the system re-plan in "
+            "milliseconds, then add a brand-new data stream while everything keeps running.\n"
+            "- **Adaptive policy** tab: watch the scheduler's objective weights change on their own as "
             "outcomes come in.\n"
-            "- **💬 Ask the explainer** tab: ask why any job landed where it did.\n"
-            "- **🔮 What if** tab: ask what a hypothetical device failure would do, before it happens."
+            "- **Ask the explainer** tab: ask why any job landed where it did.\n"
+            "- **What if** tab: ask what a hypothetical device failure would do, before it happens."
         )
 
     _render_state_overview(world, replanner, registry)
 
     st.divider()
     tab_disrupt, tab_policy, tab_explain, tab_whatif = st.tabs(
-        ["⚡ Disruptions & Streams", "📈 Adaptive policy", "💬 Ask the explainer", "🔮 What if"]
+        ["Disruptions & Streams", "Adaptive policy", "Ask the explainer", "What if"]
     )
     with tab_disrupt:
         _render_disruptions_tab()
@@ -667,7 +677,7 @@ def main() -> None:
     with tab_whatif:
         _render_whatif_tab(world, replanner, policy)
 
-    st.sidebar.button("🔄 Reset simulation", on_click=lambda: st.session_state.clear(), width="stretch")
+    st.sidebar.button("Reset simulation", on_click=lambda: st.session_state.clear(), width="stretch")
     st.sidebar.caption("Clears all state and starts over with a fresh fleet.")
 
 
