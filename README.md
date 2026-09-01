@@ -5,6 +5,14 @@ A system that decides which device should do which job, learns from how those de
 
 ---
 
+## Purpose
+
+Loom decides who does what, in real time, as things keep changing.
+
+It's a dispatcher for a fleet of devices and a stream of jobs. When something changes, like a device failing or an urgent job coming in, it adjusts just the affected part instead of starting over, gets better at the decision over time, and can explain why it made a given call.
+
+---
+
 ## 1. What this is
 
 A fleet of devices with mixed capabilities (battery, load, connectivity) gets a continuous stream of jobs. Most systems hardcode rules that never learn, or special-case each scenario, breaking when something unanticipated happens. Loom does neither: a policy that learns continuously from outcomes, and one mechanism for every kind of change, both backed by tests.
