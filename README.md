@@ -59,7 +59,7 @@ Fairness (how evenly work spreads across devices) doesn't improve as the policy 
 ## Stack, and why
 
 - **Google OR-Tools (CP-SAT)** for the scheduling solver
-- **A hand-rolled contextual bandit**, not a heavier RL setup, easier to debug and how similar problems get solved in production elsewhere
+- **A hand-rolled contextual bandit**, not a heavier RL setup, easier to debug and reason about, and this is genuinely how similar problems get solved in production elsewhere
 - **Anthropic's API** for parsing and explanations, with a rule-based fallback so it runs with zero setup and no key
 - **Streamlit** for the dashboard, **pytest** for the tests
 
