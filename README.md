@@ -12,6 +12,8 @@ Every change, whatever it is, resolves to one of three shapes: resource changed,
 
 New data sources plug in without touching existing code, just implement one interface and register. Verified live: adding a source mid-run, with zero other code touched.
 
+Categories are pluggable the same way sources are: device kinds and job requirements were never a fixed enum, just a plain string match, so a brand-new category the code has never seen gets scheduled correctly by the real solver and replanner with zero changes elsewhere — proven with a device kind that appears nowhere else in the codebase (`tests/test_pluggable_categories.py`). Loom also checks what it *could* do, not just what's assigned: a live feasibility layer reports which categories the current fleet can actually handle right now, updating the instant a device joins, drops, or fills up (`fleet/feasibility.py`, `tests/test_feasibility.py`).
+
 Job requests can arrive as plain sentences. An LLM structures them, and can say "I don't know" instead of guessing on nonsense input. You can also ask why any decision was made and get an answer grounded in real numbers, not a plausible-sounding guess.
 
 ## How it fits together
@@ -49,7 +51,7 @@ Fairness (how evenly work spreads across devices) doesn't improve as the policy 
 
 ## The numbers
 
-- 76 automated tests
+- 99 automated tests
 - Incremental replan: 5-8.5ms, regardless of fleet size
 - Full recompute: ~0.10s at 50 devices, over 1s at 150
 - Event throughput: 80,000-86,000 events/sec, stable from 1k to 50k events

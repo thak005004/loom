@@ -20,6 +20,7 @@ import logging
 import os
 import random
 import time
+import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
@@ -27,6 +28,7 @@ import streamlit as st
 from orchestrator.agents.explainer import explain_assignment, explain_what_if
 from orchestrator.events.bus import EventBus
 from orchestrator.events.types import ChangeKind, Event, EventType
+from orchestrator.fleet.feasibility import feasible_categories
 from orchestrator.fleet.state import WorldState
 from orchestrator.llm.client import AnthropicLLMClient, LLMClient, MockLLMClient
 from orchestrator.parsing.nl_parser import parse_demand_event
@@ -40,7 +42,7 @@ from orchestrator.streams.demand_stream import DemandStreamAdapter
 from orchestrator.streams.maintenance_stream import MaintenanceStreamAdapter
 from orchestrator.streams.override_stream import OverrideStreamAdapter
 from orchestrator.streams.registry import StreamRegistry
-from orchestrator.streams.telemetry_stream import TelemetryStreamAdapter
+from orchestrator.streams.telemetry_stream import DEVICE_KINDS, TelemetryStreamAdapter
 
 FLEET_SIZE = 25
 
@@ -284,6 +286,23 @@ def kill_random_device() -> Optional[Event]:
     return telemetry.emit(raw)  # reuses telemetry_stream's own parse()
 
 
+def add_random_device() -> Optional[Event]:
+    telemetry = st.session_state.streams["telemetry"]
+    world = st.session_state.world
+    device_id = f"dev-new-{uuid.uuid4().hex[:6]}"
+    while device_id in world.devices:  # practically never collides, but stay honest about it
+        device_id = f"dev-new-{uuid.uuid4().hex[:6]}"
+    raw = {
+        "device_id": device_id,
+        "kind": random.choice(DEVICE_KINDS),
+        "battery": 100.0,
+        "connected": True,
+        "load": 0.0,
+        "change_kind": "added",
+    }
+    return telemetry.emit(raw)  # reuses telemetry_stream's own parse() — same path kill uses
+
+
 def inject_urgent_job() -> Optional[Event]:
     demand = st.session_state.streams["demand"]
     raw = demand.next_raw()
@@ -410,6 +429,21 @@ def _render_state_overview(world: WorldState, replanner: RePlanner, registry: St
     st.subheader("Jobs")
     st.dataframe(_job_rows(world, replanner), width="stretch", hide_index=True)
 
+    st.subheader("What we can currently do")
+    st.caption(
+        "Capability, not commitment: for every category of work the fleet has ever been asked about or could "
+        "offer, does at least one connected device with spare capacity exist right now? Updates live as "
+        "devices join, drop, or fill up — independent of what's actually queued."
+    )
+    feasibility = feasible_categories(world)
+    if feasibility:
+        ordered = sorted(feasibility.items(), key=lambda kv: (kv[0] is None, kv[0] or ""))
+        cols = st.columns(min(4, len(ordered)))
+        for i, (category, feasible) in enumerate(ordered):
+            label = "Unconstrained (any device)" if category is None else category
+            with cols[i % len(cols)]:
+                st.markdown(f"{'✅' if feasible else '❌'} `{label}`")
+
 
 def _render_disruptions_tab() -> None:
     st.caption(
@@ -418,16 +452,20 @@ def _render_disruptions_tab() -> None:
         "of the plan gets re-solved, not the whole fleet."
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         if st.button("💀 Kill a random device", width="stretch"):
             run_disruption(kill_random_device)
         st.caption("A device goes offline mid-job.")
     with c2:
+        if st.button("🌱 Device joins", width="stretch"):
+            run_disruption(add_random_device)
+        st.caption("A new device (random kind) joins the fleet.")
+    with c3:
         if st.button("🚨 Inject an urgent job", width="stretch"):
             run_disruption(inject_urgent_job)
         st.caption("A new high-priority request arrives.")
-    with c3:
+    with c4:
         if st.button("📋 Trigger a rule change", width="stretch"):
             run_disruption(trigger_rule_change)
         st.caption("A policy rule is introduced mid-run.")
