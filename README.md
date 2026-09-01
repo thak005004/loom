@@ -2,19 +2,17 @@
 
 A scheduler that assigns jobs to a fleet of devices, learns from its own decisions, and reacts to change in milliseconds instead of recomputing everything.
 
-## Purpose
-
-Loom decides who does what, in real time, as things keep changing. Devices drop offline, urgent jobs jump the line, rules change. Instead of fixed rules that never improve, or special-case code that breaks on anything unplanned, Loom learns from outcomes and handles every kind of change through one general mechanism.
+Devices drop offline, urgent jobs jump the line, rules change. Most schedulers either use fixed rules that never improve, or special-case every scenario and break the first time something unplanned happens. Loom does neither: it learns from outcomes, and it handles every kind of change through one general mechanism instead of a pile of special cases.
 
 ## How it works
 
-A contextual bandit picks the scheduler's priority weights (urgency vs. battery vs. load) based on current conditions, watches how each decision plays out, and adjusts. It never stops learning. Proof: two identical policies, rewarded for opposite choices, learned to make opposite decisions.
+A contextual bandit picks the scheduler's priority weights (urgency vs. battery vs. load) based on current conditions, watches how each decision plays out, and adjusts. It never stops learning. Proof, not just a claim: two identical policies, rewarded for opposite choices, learned to make opposite decisions.
 
-Every change (device dies, job arrives, rule changes) resolves to one of three shapes: resource changed, demand changed, rule changed. The scheduler only re-solves the part actually affected, not the whole plan. A full recompute slows down as the fleet grows; incremental replanning stays fast regardless of fleet size.
+Every change, whatever it is, resolves to one of three shapes: resource changed, demand changed, rule changed. The scheduler only re-solves the part actually affected, not the whole plan. A full recompute slows down as the fleet grows; incremental replanning stays fast no matter the fleet size.
 
-New data sources plug in without touching existing code, just implement one interface and register. Verified live: adding a source mid-run, zero other code touched.
+New data sources plug in without touching existing code, just implement one interface and register. Verified live: adding a source mid-run, with zero other code touched.
 
-Job requests can arrive as plain sentences. An LLM structures them, and can say "I don't know" instead of guessing on nonsense. You can also ask why any decision was made and get an answer grounded in real numbers. Both fall back to simple rule-based logic with no API key set.
+Job requests can arrive as plain sentences. An LLM structures them, and can say "I don't know" instead of guessing on nonsense input. You can also ask why any decision was made and get an answer grounded in real numbers, not a plausible-sounding guess.
 
 ## How it fits together
 
@@ -56,9 +54,12 @@ Fairness (how evenly work spreads across devices) doesn't improve as the policy 
 - Full recompute: ~0.10s at 50 devices, over 1s at 150
 - Event throughput: 80,000-86,000 events/sec, stable from 1k to 50k events
 
-## Stack
+## Stack, and why
 
-Python, Google OR-Tools (CP-SAT), a hand-rolled contextual bandit, Anthropic's API with a rule-based fallback, Streamlit, pytest.
+- **Google OR-Tools (CP-SAT)** for the actual scheduling solver
+- **A hand-rolled contextual bandit**, not a heavier RL setup, easier to debug and reason about, and this is genuinely how similar problems get solved in production elsewhere
+- **Anthropic's API** for parsing and explanations, with a rule-based fallback so the whole thing runs with zero setup and no key
+- **Streamlit** for the dashboard, **pytest** for the tests
 
 ## Running it
 
