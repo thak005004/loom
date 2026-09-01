@@ -18,6 +18,7 @@ from typing import Any, Dict
 from orchestrator.events.types import Event
 from orchestrator.fleet.state import WorldState
 from orchestrator.llm.client import LLMClient
+from orchestrator.scheduling.whatif import WhatIfResult
 
 
 def explain_assignment(job_id: str, assignments: Dict[str, str], world: WorldState, weights: Dict[str, Any], llm: LLMClient) -> str:
@@ -68,5 +69,33 @@ def explain_no_replan(event: Event, world: WorldState, llm: LLMClient) -> str:
         "known state and don't by themselves invalidate any existing job assignment — only a device being added, "
         "removed, or gaining/losing a capability, or any demand or rule change, triggers a scoped re-plan. "
         "Do not invent any other reason."
+    )
+    return llm.complete(prompt)
+
+
+def explain_what_if(result: WhatIfResult, llm: LLMClient) -> str:
+    """Narrates a hypothetical device-failure simulation (see
+    scheduling/whatif.py) — grounded the same way as every other
+    explanation here: the diff is computed first, and the LLM is only
+    ever asked to phrase facts it's already been handed."""
+    if not result.device_existed:
+        return f"Device {result.device_id} isn't in the current fleet, so there's nothing to simulate."
+    if not result.orphaned_job_ids:
+        return f"Device {result.device_id} has no jobs assigned to it right now, so its failure wouldn't move any work."
+
+    move_descriptions = []
+    for job_id in result.orphaned_job_ids:
+        new_device = result.moves.get(job_id)
+        if new_device:
+            move_descriptions.append(f"{job_id} would move to {new_device}")
+        else:
+            move_descriptions.append(f"{job_id} would become unassigned")
+    moves_text = "; ".join(move_descriptions)
+
+    prompt = (
+        f"If device {result.device_id} failed right now, the following jobs currently assigned to it "
+        f"would be rescheduled by the same scheduler and the same active policy weights: {moves_text}. "
+        "In 1-2 plain-English sentences, summarize what this hypothetical failure would mean for the fleet. "
+        "Ground your answer only in these facts — do not invent any other reason or outcome."
     )
     return llm.complete(prompt)

@@ -93,6 +93,11 @@ _UNASSIGNED_RE = re.compile(r"Job (\S+) \(priority=(\w+), requires=(\w+|None)\) 
 _NO_REPLAN_RE = re.compile(
     r"A (\S+)/(\S+) event arrived for device (\S+) " r"\(battery=([\d.]+|None), load=([\d.]+|None), connected=(\w+)\)\."
 )
+_WHATIF_RE = re.compile(
+    r"If device (\S+) failed right now, the following jobs currently assigned to it "
+    r"would be rescheduled by the same scheduler and the same active policy weights: (.*?)\. "
+    r"In 1-2 plain-English"
+)
 
 
 def _classify_text(text: str) -> Optional[Dict[str, Any]]:
@@ -158,6 +163,8 @@ class MockLLMClient:
     def complete(self, prompt: str) -> str:
         if "UNPARSEABLE" in prompt:
             return self._parse_job_request(prompt)
+        if "would be rescheduled by the same scheduler" in prompt:
+            return self._explain_what_if(prompt)
         if "currently has no device assigned" in prompt:
             return self._explain_unassigned(prompt)
         if "did not trigger a re-plan" in prompt:
@@ -208,4 +215,17 @@ class MockLLMClient:
             f"This was a routine {event_type}/{change_kind} update for {device_id} (battery {_round_str(battery, 1)}%, "
             f"load {_round_str(load, 2)}, connected {connected}), which just refreshes the fleet's known state. "
             "Routine telemetry changes don't invalidate existing assignments, so no re-plan was triggered."
+        )
+
+    def _explain_what_if(self, prompt: str) -> str:
+        match = _WHATIF_RE.search(prompt)
+        if not match:
+            return (
+                "If that device failed, the jobs it's currently holding would be rescheduled by the same "
+                "solver under the same active policy weights, exactly like a real device failure."
+            )
+        device_id, moves_text = match.groups()
+        return (
+            f"If {device_id} failed right now: {moves_text}, the same as a real device failure would trigger, "
+            "under the policy's current active weights."
         )

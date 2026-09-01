@@ -24,7 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
-from orchestrator.agents.explainer import explain_assignment
+from orchestrator.agents.explainer import explain_assignment, explain_what_if
 from orchestrator.events.bus import EventBus
 from orchestrator.events.types import ChangeKind, Event, EventType
 from orchestrator.fleet.state import WorldState
@@ -34,6 +34,7 @@ from orchestrator.policy.bandit_policy import ARM_NAMES, BanditPolicy
 from orchestrator.policy.fairness import load_distribution_stdev
 from orchestrator.scheduling.replanner import RePlanner
 from orchestrator.scheduling.solver import solve_world
+from orchestrator.scheduling.whatif import simulate_device_failure
 from orchestrator.streams.context_stream import RULES, ContextStreamAdapter
 from orchestrator.streams.demand_stream import DemandStreamAdapter
 from orchestrator.streams.maintenance_stream import MaintenanceStreamAdapter
@@ -100,6 +101,7 @@ def init_state() -> None:
         last_timing=None,
         chat_log=[],
         parse_log=[],
+        whatif_log=[],
     )
     _record_round(policy, replanner, world)
 
@@ -546,6 +548,34 @@ def _render_explainer_tab(world: WorldState, replanner: RePlanner, policy: Bandi
             st.markdown(f"**Why `{job_id}`?**\n\n{answer}")
 
 
+def _render_whatif_tab(world: WorldState, replanner: RePlanner, policy: BanditPolicy) -> None:
+    st.caption(
+        "Ask what would happen if a device failed right now — without actually failing it. This clones "
+        "the current state, runs it through the same solver and the same active policy weights, and "
+        "discards the clone. The real schedule and the bandit's learned weights are never touched."
+    )
+    llm, _ = get_llm_client()
+
+    device_ids = sorted(world.devices)
+    if device_ids:
+        selected_device = st.selectbox("Device", device_ids, key="whatif_device")
+        if st.button("What if this device failed?"):
+            active_weights = dict(policy.arms[policy.last_arm_index]) if policy.last_arm_index is not None else {}
+            result = simulate_device_failure(world, replanner.assignments, selected_device, active_weights)
+            try:
+                answer = explain_what_if(result, llm)
+            except Exception as exc:  # e.g. invalid key, network/rate-limit error mid-demo
+                answer = f"(explainer call failed: {exc})"
+            st.session_state.whatif_log.append((selected_device, result, answer))
+
+    for device_id, result, answer in reversed(st.session_state.whatif_log[-10:]):
+        with st.chat_message("assistant"):
+            st.markdown(f"**What if `{device_id}` failed?**\n\n{answer}")
+            if result.moves:
+                for job_id, new_device in result.moves.items():
+                    st.caption(f"`{job_id}`: {new_device if new_device else 'would become unassigned'}")
+
+
 def main() -> None:
     st.set_page_config(page_title="Loom", layout="wide", page_icon="🛰️")
     _hide_streamlit_chrome()
@@ -580,19 +610,24 @@ def main() -> None:
             "milliseconds — and add a brand-new data stream while everything keeps running.\n"
             "- **📈 Adaptive policy** tab: watch the scheduler's objective weights change on their own as "
             "outcomes come in.\n"
-            "- **💬 Ask the explainer** tab: ask why any job landed where it did."
+            "- **💬 Ask the explainer** tab: ask why any job landed where it did.\n"
+            "- **🔮 What if** tab: ask what a hypothetical device failure would do, before it happens."
         )
 
     _render_state_overview(world, replanner, registry)
 
     st.divider()
-    tab_disrupt, tab_policy, tab_explain = st.tabs(["⚡ Disruptions & Streams", "📈 Adaptive policy", "💬 Ask the explainer"])
+    tab_disrupt, tab_policy, tab_explain, tab_whatif = st.tabs(
+        ["⚡ Disruptions & Streams", "📈 Adaptive policy", "💬 Ask the explainer", "🔮 What if"]
+    )
     with tab_disrupt:
         _render_disruptions_tab()
     with tab_policy:
         _render_policy_tab(history)
     with tab_explain:
         _render_explainer_tab(world, replanner, policy)
+    with tab_whatif:
+        _render_whatif_tab(world, replanner, policy)
 
     st.sidebar.button("🔄 Reset simulation", on_click=lambda: st.session_state.clear(), width="stretch")
     st.sidebar.caption("Clears all state and starts over with a fresh fleet.")
