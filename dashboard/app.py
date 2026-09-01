@@ -16,10 +16,11 @@ Run with: streamlit run dashboard/app.py
 
 from __future__ import annotations
 
+import logging
 import os
 import random
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import streamlit as st
 
@@ -27,7 +28,7 @@ from orchestrator.agents.explainer import explain_assignment
 from orchestrator.events.bus import EventBus
 from orchestrator.events.types import ChangeKind, Event, EventType
 from orchestrator.fleet.state import WorldState
-from orchestrator.llm.client import AnthropicLLMClient
+from orchestrator.llm.client import AnthropicLLMClient, LLMClient, MockLLMClient
 from orchestrator.parsing.nl_parser import parse_demand_event
 from orchestrator.policy.bandit_policy import ARM_NAMES, BanditPolicy
 from orchestrator.policy.fairness import load_distribution_stdev
@@ -41,6 +42,12 @@ from orchestrator.streams.registry import StreamRegistry
 from orchestrator.streams.telemetry_stream import TelemetryStreamAdapter
 
 FLEET_SIZE = 25
+
+# Python's root logger defaults to WARNING — without this, logger.info()
+# below is silently dropped and never reaches the terminal, which
+# defeats the point of logging which LLM mode is active at startup.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 # -- setup, once per session --
@@ -98,18 +105,28 @@ def init_state() -> None:
 
 
 @st.cache_resource
-def get_llm_client() -> Optional[AnthropicLLMClient]:
-    # anthropic.Anthropic() does NOT raise at construction time even
-    # with no key configured — it only fails on the first real API
-    # call — so a bare try/except here would never actually catch the
-    # "no key" case and the explainer would show as ready, then crash
-    # on first use. Check for the key explicitly instead.
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return None
-    try:
-        return AnthropicLLMClient()
-    except Exception:
-        return None
+def get_llm_client() -> Tuple[LLMClient, bool]:
+    """Returns (client, is_mock). Real Anthropic client whenever
+    ANTHROPIC_API_KEY is set; MockLLMClient otherwise — so the parser
+    and explainer are never disabled, just backed by a rule-based
+    fallback, and a fresh clone works with zero setup. Logged once at
+    startup so which mode is active is visible in the terminal too, not
+    just the on-page banner.
+
+    anthropic.Anthropic() does NOT raise at construction time even with
+    no key configured — it only fails on the first real API call — so
+    a bare try/except around construction would never actually catch
+    the "no key" case. Check for the key explicitly instead."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            client: LLMClient = AnthropicLLMClient()
+            logger.info("LLM mode: live Anthropic API (ANTHROPIC_API_KEY set)")
+            return client, False
+        except Exception as exc:
+            logger.warning("ANTHROPIC_API_KEY is set but the client failed to construct (%s); falling back to mock mode.", exc)
+    else:
+        logger.info("LLM mode: offline mock (no ANTHROPIC_API_KEY set) — parser/explainer use rule-based fallbacks.")
+    return MockLLMClient(), True
 
 
 # -- shared helpers (reused by every disruption button, no per-button logic) --
@@ -197,10 +214,7 @@ def parse_pending_requests() -> None:
     replanner = st.session_state.replanner
     policy = st.session_state.policy
 
-    llm = get_llm_client()
-    if llm is None:
-        st.session_state.parse_log = ["Set ANTHROPIC_API_KEY (and restart) to enable the parser."]
-        return
+    llm, _ = get_llm_client()
 
     pending = [j for j in world.open_jobs() if j.get("structured") is False]
     if not pending:
@@ -503,23 +517,26 @@ def _render_policy_tab(history: List[Dict[str, Any]]) -> None:
         st.line_chart({"fairness (load stdev)": [h.get("fairness", 0.0) for h in history]})
 
 
-def _render_explainer_tab(world: WorldState, replanner: RePlanner) -> None:
+def _render_explainer_tab(world: WorldState, replanner: RePlanner, policy: BanditPolicy) -> None:
     st.caption(
         "Ask why a job ended up where it did. The answer is grounded in the real numbers behind that "
         "decision — the job's priority and requirements, the device's battery and load, the policy's "
         "active weights — not a free-form guess."
     )
-    llm = get_llm_client()
-    if llm is None:
-        st.info("Set ANTHROPIC_API_KEY (and restart the app) to enable the explainer.")
-        return
+    llm, _ = get_llm_client()
 
     job_ids = sorted(world.jobs)
     if job_ids:
         selected_job = st.selectbox("Job", job_ids)
         if st.button("Why is this job assigned this way?"):
+            # The real active weights live on the policy (policy.arms[policy.last_arm_index]),
+            # not replanner.weights — that attribute is only ever a fallback used when no
+            # policy is attached, and this dashboard always attaches one (see RePlanner's
+            # own docstring). Passing the stale empty replanner.weights here would ground
+            # the explanation in weights that were never actually used.
+            active_weights = dict(policy.arms[policy.last_arm_index]) if policy.last_arm_index is not None else {}
             try:
-                answer = explain_assignment(selected_job, replanner.assignments, world, replanner.weights, llm)
+                answer = explain_assignment(selected_job, replanner.assignments, world, active_weights, llm)
             except Exception as exc:  # e.g. invalid key, network/rate-limit error mid-demo
                 answer = f"(explainer call failed: {exc})"
             st.session_state.chat_log.append((selected_job, answer))
@@ -536,6 +553,7 @@ def main() -> None:
 
     world = st.session_state.world
     replanner = st.session_state.replanner
+    policy = st.session_state.policy
     registry = st.session_state.registry
     history = st.session_state.weight_history
 
@@ -545,6 +563,16 @@ def main() -> None:
         "independent data streams, scheduled by a CP-SAT solver whose objective is chosen by a "
         "self-adapting policy, and re-planned incrementally — not from scratch — whenever something changes."
     )
+
+    _, is_mock = get_llm_client()
+    if is_mock:
+        st.info(
+            "Running in offline demo mode (no ANTHROPIC_API_KEY set) — the parser and explainer use "
+            "rule-based fallbacks below, not live LLM calls. Set the key and restart to see live model "
+            "behavior.",
+            icon="🔌",
+        )
+
     with st.expander("ℹ️  How to read this page"):
         st.markdown(
             "- **Fleet / Jobs** below are the live state: who's assigned to what, right now.\n"
@@ -564,7 +592,7 @@ def main() -> None:
     with tab_policy:
         _render_policy_tab(history)
     with tab_explain:
-        _render_explainer_tab(world, replanner)
+        _render_explainer_tab(world, replanner, policy)
 
     st.sidebar.button("🔄 Reset simulation", on_click=lambda: st.session_state.clear(), width="stretch")
     st.sidebar.caption("Clears all state and starts over with a fresh fleet.")
