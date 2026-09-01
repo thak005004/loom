@@ -50,7 +50,7 @@ The replanner only re-decides the piece of the plan actually touched.
 | Rule changes (e.g. job type now needs a GPU) | Rule changed | Reassigns only the jobs that rule actually affects |
 | Human operator manually reassigns something | Demand or resource changed | Handled identically to an automated change |
 
-Full recompute time grows sharply with fleet size; the incremental path stays flat, since it only touches what changed (numbers in Section 8).
+Full recompute time grows sharply with fleet size; the incremental path stays flat, since it only touches what changed (numbers in Section 7).
 
 ### 2c. Any number of data sources, pluggable at any time
 
@@ -113,40 +113,13 @@ The honest claim: the policy demonstrably adapts and improves at the objective i
 
 ---
 
-## 6. Architecture
-
-```
-Five pluggable data sources         Shared event language          Live current state
-(telemetry, demand, context,   ->   (resource changed /       ->   (devices that exist now,
- maintenance, manual override)       demand changed /               jobs currently open)
-                                      rule changed)
-                                            |
-                                            v
-                        Learning policy picks priorities   ->   Scheduler assigns jobs to devices
-                        (adjusts from real outcomes)             (respects capability and capacity)
-                                            ^                              |
-                                            |                              v
-                                            +----- outcome fed back ---- Incremental replanner
-                                                                          (reacts to any change,
-                                                                           touches only what's affected)
-                                                                                    |
-                                                                                    v
-                                                                    Explains any decision in plain
-                                                                    language, grounded in real state
-                                                                                    |
-                                                                                    v
-                                                                          Live dashboard
-```
-
----
-
-## 7. Fit with Intel's direction
+## 6. Fit with Intel's direction
 
 The heterogeneous fleet mirrors where OpenVINO's roadmap is headed: task-based scheduling across CPU/GPU/NPU instead of targeting hardware manually. Parsing and matching run on-device via OpenVINO; the CP-SAT solves and learning loop are the steady, latency-sensitive workload Xeon and AMX are built for. The pluggable-services shape mirrors OPEA's reference architecture.
 
 ---
 
-## 8. What's tested, and the real numbers
+## 7. What's tested, and the real numbers
 
 - **76 automated tests**: the scheduler never assigns a device to work it can't handle; the replanner scopes correctly to the affected slice for every kind of change; the policy's behavior measurably shifts based on real outcomes, for both full and incremental decisions; a new data source can be added while the system is running with zero other code touched; the parser abstains rather than guesses on input it can't confidently classify.
 - **Incremental replan latency**: roughly 5 to 8.5ms, scaling with how many jobs were actually affected, not with fleet size.
@@ -156,7 +129,7 @@ The heterogeneous fleet mirrors where OpenVINO's roadmap is headed: task-based s
 
 ---
 
-## 9. What's next
+## 8. What's next
 
 Deliberately not built, each a real multi-day undertaking:
 
@@ -167,7 +140,7 @@ Deliberately not built, each a real multi-day undertaking:
 
 ---
 
-## 10. Running it
+## 9. Running it
 
 ```bash
 pip install -e .
